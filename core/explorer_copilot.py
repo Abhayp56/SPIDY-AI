@@ -48,6 +48,8 @@ def _get_known_folders() -> Dict[str, Path]:
         "user": home,
         "workspace": workspace,
         "project": workspace,
+        "spidy": workspace,
+        "spidy-ai": workspace,
         "mark-lv": workspace,
     }
 

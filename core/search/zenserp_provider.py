@@ -51,7 +51,7 @@ class ZenserpSearchProvider(BaseSearchProvider):
 
         headers = {
             "apikey": key,
-            "User-Agent": "Mark-LV-Agent/1.0",
+            "User-Agent": "SPIDY-Agent/1.0",
         }
         params = {
             "apikey": key,

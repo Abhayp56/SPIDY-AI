@@ -54,7 +54,7 @@ class GcrawlAISearchProvider(BaseSearchProvider):
             "X-API-Key": key,
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
-            "User-Agent": "Mark-LV-Agent/1.0",
+            "User-Agent": "SPIDY-Agent/1.0",
         }
 
         # Gcrawl search body schema strictly requires {"query": ...}.
