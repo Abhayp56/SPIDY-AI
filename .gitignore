@@ -1,0 +1,50 @@
+# ── S.P.I.D.Y. AI — Git Ignore Rules ──────────────────────────────────────────
+# Secrets, private keys, and active user sessions must never be committed.
+
+# Secrets & Credentials
+config/api_keys.json
+config/certs/
+config/whatsapp_web/
+data/
+data/**
+**/token*.json
+**/client_secret*.json
+*credentials*.json
+.env
+.env.*
+
+# Personal Memory Profile & DB
+memory/long_term.json
+memory/*.db
+
+# Python build and cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editors and operating system artifacts
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Runtime logs and downloads
+*.log
+logs/
+downloads/
+screenshots/
+scratch/
+-c/

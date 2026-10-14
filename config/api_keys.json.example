@@ -1,0 +1,10 @@
+{
+  "gemini_api_key": "YOUR_GEMINI_API_KEY_HERE",
+  "gcrawl_api_key": "",
+  "serpstack_api_key": "",
+  "zenserp_api_key": "",
+  "ui_mode": "island",
+  "assistant_name": "S.P.I.D.Y.",
+  "voice_name": "Alnilam",
+  "camera_index": 0
+}
