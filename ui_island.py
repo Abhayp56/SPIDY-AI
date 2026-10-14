@@ -927,8 +927,23 @@ class JarvisIslandUI(QObject):
             self._collapse_sig.emit(500)
 
     def wait_for_api_key(self):
+        if not self._ready:
+            key = get_gemini_key()
+            if not key or len(key) <= 15:
+                print("\n" + "=" * 65)
+                print("🕷️  S.P.I.D.Y. AI — Setup")
+                print("Get your free Gemini API key from: https://aistudio.google.com/app/apikey")
+                print("=" * 65)
+                try:
+                    user_key = input("Enter your Gemini API key: ").strip()
+                    if user_key and len(user_key) > 10:
+                        save_api_keys(user_key)
+                        self._ready = True
+                except Exception:
+                    pass
         while not self._ready:
-            time.sleep(0.2)
+            time.sleep(0.4)
+            self._ready = bool(get_gemini_key() and len(get_gemini_key()) > 15)
 
     def prompt_reconfig(self):
         pass

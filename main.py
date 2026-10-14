@@ -329,8 +329,37 @@ def _render_prompt(template: str, values: dict) -> str:
 
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    from memory.config_manager import get_gemini_key, save_api_keys
+    import os
+    key = get_gemini_key() or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if key and len(key.strip()) > 10:
+        return key.strip()
+
+    if API_CONFIG_PATH.exists():
+        try:
+            with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
+                val = json.load(f).get("gemini_api_key", "").strip()
+                if val:
+                    return val
+        except Exception:
+            pass
+
+    print("\n" + "=" * 65)
+    print("🕷️  S.P.I.D.Y. AI — Gemini API Key Required")
+    print("Get your free API key at: https://aistudio.google.com/app/apikey")
+    print("=" * 65)
+    try:
+        user_key = input("Enter your Gemini API Key: ").strip()
+        if user_key and len(user_key) > 10:
+            save_api_keys(user_key)
+            return user_key
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        "Missing Gemini API key! Please copy config/api_keys.json.example to "
+        "config/api_keys.json and add your key, or set GEMINI_API_KEY."
+    )
 
 
 def _load_system_prompt() -> str:
