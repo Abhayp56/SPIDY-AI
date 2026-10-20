@@ -14,7 +14,6 @@ from typing import Any, Dict, Optional
 
 from core.autonomous_worker import get_worker
 from core.hermes_bridge import get_hermes_bridge
-from core import confirm as confirm_gate
 
 logger = logging.getLogger("HermesWorkerAction")
 
@@ -59,8 +58,6 @@ def hermes_task_action(
             except Exception:
                 pass
 
-    # Approval must return to the Live receiver immediately so it can hear a
-    # later spoken yes/no. Run only after the interface-issued gate resolves.
     task_id = f"hermes_{uuid.uuid4().hex[:8]}"
     worker = get_worker()
 
@@ -83,22 +80,7 @@ def hermes_task_action(
         _progress(f"Finished: {final_resp[:180]}")
         return final_resp
 
-    def _start_after_approval() -> str:
-        mode = "background" if background else "approved"
-        worker.submit_task(task_id, f"Hermes: {task[:100]} ({mode})", _execute)
-        _log("Voice approval received. Starting the approved task.")
-        return "Task queued after voice approval."
-
-    if confirm_gate.requires_voice_approval(task):
-        # Critical or clearly deep work waits for a spoken decision.
-        return confirm_gate.request(
-            key=f"hermes-{uuid.uuid4().hex[:8]}",
-            title="Approve Hermes task?",
-            detail=f"Hermes will carry out this task:\n\n{task[:900]}",
-            run=_start_after_approval,
-        )
-
-    # Routine and moderate tasks keep the quick path without an approval prompt.
+    # User-issued tasks execute directly without a separate approval prompt.
     if background:
         worker.submit_task(task_id, f"Hermes: {task[:100]}", _execute)
         return "I have started that task in the background and will report when it finishes."

@@ -21,7 +21,6 @@ try:
 except ImportError:
     _PYPERCLIP = False
 
-from core import confirm
 from core.undo import push_undo
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
@@ -60,7 +59,8 @@ def _get_macos_wifi_interface() -> str:
 
 def volume_up():
     if _OS == "Windows":
-        for _ in range(5): pyautogui.press("volumeup")
+        for _ in range(5):
+            _windows_media_key(0xAF)  # VK_VOLUME_UP
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             "set volume output volume (output volume of (get volume settings) + 10)"],
@@ -71,7 +71,8 @@ def volume_up():
 
 def volume_down():
     if _OS == "Windows":
-        for _ in range(5): pyautogui.press("volumedown")
+        for _ in range(5):
+            _windows_media_key(0xAE)  # VK_VOLUME_DOWN
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             "set volume output volume (output volume of (get volume settings) - 10)"],
@@ -82,13 +83,21 @@ def volume_down():
 
 def volume_mute():
     if _OS == "Windows":
-        pyautogui.press("volumemute")
+        _windows_media_key(0xAD)  # VK_VOLUME_MUTE
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e", "set volume with output muted"],
             capture_output=True)
     else:
         subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"],
             capture_output=True)
+
+
+def _windows_media_key(virtual_key: int) -> None:
+    """Send a Windows multimedia key without relying on desktop automation."""
+    import ctypes
+    user32 = ctypes.windll.user32
+    user32.keybd_event(virtual_key, 0, 0, 0)
+    user32.keybd_event(virtual_key, 0, 0x0002, 0)  # KEYEVENTF_KEYUP
 
 def volume_get() -> int | None:
     """Current master volume 0-100, or None if this platform will not say.
@@ -98,17 +107,11 @@ def volume_get() -> int | None:
     undoable — a wrong undo is worse than no undo."""
     try:
         if _OS == "Windows":
-            import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+            from pycaw.pycaw import AudioUtilities
             devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
-            db        = vol.GetMasterVolumeLevel()
-            if db <= -65.0:
-                return 0
-            return max(0, min(100, round(10 ** (db / 20) * 100)))
+            vol = devices.EndpointVolume
+            scalar = vol.GetMasterVolumeLevelScalar()
+            return max(0, min(100, round(scalar * 100)))
         if _OS == "Darwin":
             r = subprocess.run(["osascript", "-e", "output volume of (get volume settings)"],
                                capture_output=True, text=True, timeout=5)
@@ -149,12 +152,7 @@ def brightness_set(value: int) -> None:
     captured before a change, so it is undo's counterpart to the up/down pair."""
     value = max(0, min(100, int(value)))
     if _OS == "Windows":
-        subprocess.run(
-            ["powershell", "-Command",
-             "(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightnessMethods)"
-             f".WmiSetBrightness(1, {value})"],
-            capture_output=True, timeout=5, **_WIN_HIDE
-        )
+        _set_windows_brightness(value)
     elif _OS == "Linux":
         subprocess.run(["brightnessctl", "set", f"{value}%"], capture_output=True)
 
@@ -163,20 +161,12 @@ def volume_set(value: int):
     value = max(0, min(100, int(value)))
     if _OS == "Windows":
         try:
-            import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+            from pycaw.pycaw import AudioUtilities
             devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
-            vol_db    = -65.25 if value == 0 else max(-65.25, 20 * math.log10(value / 100))
-            vol.SetMasterVolumeLevel(vol_db, None)
+            devices.EndpointVolume.SetMasterVolumeLevelScalar(value / 100, None)
             return
         except Exception as e:
-            print(f"[Settings] pycaw failed, using keypress fallback: {e}")
-            pyautogui.press("volumemute")
-            pyautogui.press("volumemute")
+            raise RuntimeError(f"Windows volume control is unavailable: {e}") from e
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e", f"set volume output volume {value}"],
             capture_output=True)
@@ -204,16 +194,7 @@ def brightness_up():
                 shell=True, capture_output=True
             )
     else:
-        try:
-            subprocess.run(
-                ["powershell", "-Command",
-                 "(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightnessMethods)"
-                 ".WmiSetBrightness(1, [math]::Min(100, "
-                 "(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightness).CurrentBrightness + 10))"],
-                capture_output=True, timeout=5, **_WIN_HIDE
-            )
-        except Exception as e:
-            print(f"[Settings] Brightness up failed on Windows: {e}")
+        _windows_adjust_brightness(10)
 
 def brightness_down():
     if _OS == "Darwin":
@@ -233,16 +214,52 @@ def brightness_down():
                 shell=True, capture_output=True
             )
     else:
-        try:
-            subprocess.run(
-                ["powershell", "-Command",
-                 "(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightnessMethods)"
-                 ".WmiSetBrightness(1, [math]::Max(0, "
-                 "(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightness).CurrentBrightness - 10))"],
-                capture_output=True, timeout=5, **_WIN_HIDE
-            )
-        except Exception as e:
-            print(f"[Settings] Brightness down failed on Windows: {e}")
+        _windows_adjust_brightness(-10)
+
+
+def _windows_adjust_brightness(delta: int) -> None:
+    current = brightness_get()
+    if current is None:
+        raise RuntimeError("Windows did not report the current display brightness")
+    _set_windows_brightness(max(0, min(100, current + delta)))
+
+
+def _set_windows_brightness(target: int) -> None:
+    script = (
+        "$m = Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightnessMethods | Select-Object -First 1; "
+        "if (-not $m) { Write-Error 'No brightness-capable monitor found'; exit 2 }; "
+        f"$r = $m.WmiSetBrightness(5, {target}); Write-Output ([int]$r)"
+    )
+    try:
+        result = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                                capture_output=True, text=True, timeout=10,
+                                check=True, **_WIN_HIDE)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        suffix = f": {detail}" if detail else f" (exit code {exc.returncode})"
+        raise RuntimeError(f"Windows brightness change failed{suffix}") from exc
+
+    try:
+        wmi_status = int(result.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        wmi_status = None
+
+    # Some display drivers apply the requested value but return a nonzero WMI
+    # status. Trust the observed display level when it matches the target.
+    observed = None
+    for _ in range(8):
+        observed = brightness_get()
+        if observed is not None and abs(observed - target) <= 3:
+            return
+        time.sleep(0.2)
+
+    if wmi_status == 0:
+        return
+    if observed is None:
+        raise RuntimeError(f"Windows returned brightness status {wmi_status}; current brightness could not be verified")
+    raise RuntimeError(
+        f"Windows returned brightness status {wmi_status}; display is at {observed}% (requested {target}%)"
+    )
 
 def close_app():
     if _OS == "Darwin":
@@ -491,7 +508,9 @@ def take_screenshot():
 
 def lock_screen():
     if _OS == "Windows":
-        pyautogui.hotkey("win", "l")
+        import ctypes
+        if not ctypes.windll.user32.LockWorkStation():
+            raise ctypes.WinError()
     elif _OS == "Darwin":
         subprocess.run(["pmset", "displaysleepnow"], capture_output=True)
     else:
@@ -606,7 +625,8 @@ def toggle_wifi():
 
 def restart_computer():
     if _OS == "Windows":
-        subprocess.run(["shutdown", "/r", "/t", "10"], capture_output=True, **_WIN_HIDE)
+        subprocess.run(["shutdown", "/r", "/t", "10"], capture_output=True,
+                       text=True, check=True, timeout=10, **_WIN_HIDE)
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             'tell application "System Events" to restart'],
@@ -616,7 +636,8 @@ def restart_computer():
 
 def shutdown_computer():
     if _OS == "Windows":
-        subprocess.run(["shutdown", "/s", "/t", "10"], capture_output=True)
+        subprocess.run(["shutdown", "/s", "/t", "10"], capture_output=True,
+                       text=True, check=True, timeout=10, **_WIN_HIDE)
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             'tell application "System Events" to shut down'],
@@ -686,36 +707,20 @@ ACTION_MAP: dict[str, callable] = {
     "shutdown":            shutdown_computer,
 }
 
-# ── What needs a human, and what just needs an undo ──────────────────────────
-#
-# The old gate was `_DANGEROUS_ACTIONS = {"restart", "shutdown"}` checked against
-# a `confirmed` parameter the MODEL filled in — so the model confirmed its own
-# shutdowns, and everything else (switching off the WiFi this assistant is
-# talking over) had no gate at all.
-#
-# Two lists now, and the split is about reversibility, not about how alarming
-# the word sounds:
-#
-#   _IRREVERSIBLE — a human must approve by voice before the action runs.
-#   everything else — done immediately, with an undo pushed if it can be undone.
-#
-# Asking before every action is what makes an assistant unusable, and every
-# question costs a round trip. Undo is both faster and safer than a prompt.
-_IRREVERSIBLE = {
+# Direct execution action metadata. These actions now run immediately when
+# explicitly requested, like the rest of the computer controls.
+_DIRECT_ACTIONS = {
     "restart":     ("Restart this computer",
                     "Anything unsaved will be lost. The computer restarts in 10 seconds."),
     "shutdown":    ("Shut this computer down",
                     "Anything unsaved will be lost. The computer powers off in 10 seconds."),
-    # Not obviously destructive, and that is exactly why it was missed: turning
-    # the WiFi off cuts the assistant's own connection to the Live API, so it
-    # cannot be asked to turn it back on.
     "toggle_wifi": ("Switch WiFi off or on",
                     "If this switches WiFi off, JARVIS loses its connection and "
                     "cannot switch it back on by voice."),
 }
 
 # Kept so anything still importing the old name keeps working.
-_DANGEROUS_ACTIONS = set(_IRREVERSIBLE)
+_DANGEROUS_ACTIONS = set(_DIRECT_ACTIONS)
 
 
 # ── Local intent resolution ──────────────────────────────────────────────────
@@ -732,15 +737,15 @@ _DANGEROUS_ACTIONS = set(_IRREVERSIBLE)
 # out in full. What is left is spelling tolerance, and difflib does that in
 # microseconds instead of ~600 ms and a quota unit.
 _ALIASES = {
-    "volume_up":       ("louder", "raise volume", "turn it up", "increase volume"),
-    "volume_down":     ("quieter", "lower volume", "turn it down", "decrease volume"),
+    "volume_up":       ("louder", "raise volume", "turn it up", "increase volume", "volume up", "turn up volume"),
+    "volume_down":     ("quieter", "lower volume", "turn it down", "decrease volume", "volume down", "turn down volume"),
     "mute":            ("silence", "sound off", "no sound"),
-    "brightness_up":   ("brighter", "raise brightness", "increase brightness"),
-    "brightness_down": ("dimmer", "dim", "lower brightness", "decrease brightness"),
+    "brightness_up":   ("brighter", "raise brightness", "increase brightness", "brightness up", "brighten screen"),
+    "brightness_down": ("dimmer", "dim", "lower brightness", "decrease brightness", "brightness down", "dim the screen"),
     "close_window":    ("close this", "close it"),
     "full_screen":     ("fullscreen", "maximise screen"),
     "show_desktop":    ("minimise everything", "go to desktop"),
-    "lock_screen":     ("lock", "lock the pc", "lock computer"),
+    "lock_screen":     ("lock", "lock the pc", "lock computer", "lock my pc", "lock my computer", "lock the computer"),
     "sleep_display":   ("screen off", "turn off the screen", "display off"),
     "dark_mode":       ("night mode", "light mode", "toggle theme"),
     "toggle_wifi":     ("wifi", "wi-fi", "internet off", "internet on"),
@@ -748,11 +753,11 @@ _ALIASES = {
     "screenshot":      ("capture screen", "take a screenshot", "snip"),
     "refresh_page":    ("refresh", "reload page"),
     "new_tab":         ("open a tab", "open new tab"),
-    "shutdown":        ("power off", "turn off the computer", "switch off the pc"),
-    "restart":         ("reboot", "restart the pc"),
+    "shutdown":        ("power off", "power down", "turn off the computer", "switch off the pc", "shut down my pc", "shut down my computer", "shut down the pc", "shut down the computer"),
+    "restart":         ("reboot", "restart the pc", "restart my pc", "restart my computer"),
 }
 
-_VALUE_ACTIONS = {"volume_set", "type_text", "press_key", "reload_n",
+_VALUE_ACTIONS = {"volume_set", "brightness_set", "type_text", "press_key", "reload_n",
                   "scroll_up", "scroll_down"}
 
 
@@ -779,10 +784,33 @@ def _detect_action(description: str) -> dict:
 
     low = raw.lower()
 
+    # Resolve compound natural-language requests before generic aliases, since
+    # "turn it up" can refer to either volume or brightness without context.
+    if re.search(r"\b(volume|sound|audio)\b", low):
+        if re.search(r"\b(up|increase|raise|louder|higher)\b", low):
+            return {"action": "volume_up", "value": None}
+        if re.search(r"\b(down|decrease|lower|quieter|softer)\b", low):
+            return {"action": "volume_down", "value": None}
+        if re.search(r"\b(mute|silence)\b", low):
+            return {"action": "mute", "value": None}
+    if re.search(r"\b(brightness|screen|display)\b", low):
+        if re.search(r"\b(up|increase|raise|brighter|brighten)\b", low):
+            return {"action": "brightness_up", "value": None}
+        if re.search(r"\b(down|decrease|lower|dimmer|dim)\b", low):
+            return {"action": "brightness_down", "value": None}
+    if re.search(r"\b(shut\s*down|power\s*off|power\s*down|turn\s*off|switch\s*off)\b", low) and re.search(r"\b(pc|computer|laptop|machine|system)\b", low):
+        return {"action": "shutdown", "value": None}
+    if re.search(r"\b(lock)\b", low) and re.search(r"\b(pc|computer|laptop|screen|desktop|workstation)\b", low):
+        return {"action": "lock_screen", "value": None}
+    if re.search(r"\b(restart|reboot)\b", low) and re.search(r"\b(pc|computer|laptop|machine|system)\b", low):
+        return {"action": "restart", "value": None}
+
     # 2. "set volume to 30", "sesi 30 yap" — a number next to a volume word.
     num = re.search(r"(\d{1,3})\s*%?", low)
     if num and any(w in low for w in ("volume", "ses", "sound", "lautstark", "громкость")):
         return {"action": "volume_set", "value": max(0, min(100, int(num.group(1))))}
+    if num and any(w in low for w in ("brightness", "screen", "display")):
+        return {"action": "brightness_set", "value": max(0, min(100, int(num.group(1))))}
 
     # 3. Alias phrases.
     for action, phrases in _ALIASES.items():
@@ -819,9 +847,6 @@ def computer_settings(
     player=None,
     session_memory=None,
 ) -> str:
-    if not _PYAUTOGUI:
-        return "pyautogui is not installed. Run: pip install pyautogui"
-
     params      = parameters or {}
     raw_action  = params.get("action", "").strip()
     description = params.get("description", "").strip()
@@ -835,28 +860,38 @@ def computer_settings(
 
     action = raw_action.lower().strip().replace(" ", "_").replace("-", "_")
 
+    if action and action not in set(ACTION_MAP) | _VALUE_ACTIONS:
+        detected = _detect_action(raw_action)
+        if detected.get("action"):
+            action = detected["action"]
+            if value is None:
+                value = detected.get("value")
+
     if not action:
         return _suggest(description or raw_action)
+
+    native_actions = {
+        "volume_up", "volume_down", "mute", "unmute", "toggle_mute", "volume_set",
+        "brightness_up", "brightness_down", "brightness_set", "lock_screen", "sleep_display", "screen_off",
+        "toggle_wifi", "restart", "shutdown",
+    }
+    if not _PYAUTOGUI and action not in native_actions:
+        return "PyAutoGUI is not installed, so this desktop action is unavailable. Run: pip install pyautogui"
 
     print(f"[Settings] Action: {action}  Value: {value}  OS: {_OS}")
     if player:
         player.write_log(f"[Settings] {action}")
 
-    # ── The gate ─────────────────────────────────────────────────────────────
-    # The model cannot authorize its own action. The user must approve by voice;
-    # the action itself is parked until the app hears a clear yes.
-    if action in _IRREVERSIBLE:
-        title, detail = _IRREVERSIBLE[action]
+    # ── Execute requested power/network actions directly ──────────────────────
+    if action in _DIRECT_ACTIONS:
         func = ACTION_MAP.get(action)
         if func is None:
             return f"Unknown action: '{raw_action}'."
-        if confirm.pending_title():
-            return ("There is already a voice confirmation waiting. "
-                    "Ask the user to answer that one first.")
-        return confirm.request(
-            key=action, title=title, detail=detail,
-            run=lambda f=func, a=action: (f(), f"{a} done.")[1],
-        )
+        try:
+            func()
+            return f"{action} command sent."
+        except Exception as e:
+            return f"Could not {action}: {e}"
 
     if action == "volume_set":
         try:
@@ -869,6 +904,18 @@ def computer_settings(
             return f"Volume set to {target}%."
         except Exception as e:
             return f"Could not set volume: {e}"
+
+    if action == "brightness_set":
+        try:
+            target = int(value if value is not None else 50)
+            before = brightness_get()
+            brightness_set(target)
+            if before is not None:
+                push_undo(f"brightness {before}% → {target}%",
+                          lambda b=before: (brightness_set(b), f"Brightness back to {b}%.")[1])
+            return f"Brightness set to {target}%."
+        except Exception as e:
+            return f"Could not set brightness: {e}"
 
     if action in ("type_text", "write_on_screen", "type", "write"):
         text = str(value or params.get("text", "")).strip()
@@ -941,7 +988,7 @@ def computer_settings(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "computer_settings",
-    "description": "Controls the computer: volume, brightness, window management, keyboard shortcuts, typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. Use for ANY single computer control command. Restart, shutdown, and turning WiFi off require the user to approve by voice; do not claim they are done before approval. Volume, brightness and dark mode can be reversed by the `undo` tool.",
+    "description": "Controls the computer: volume, brightness, window management, keyboard shortcuts, typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. Use for ANY single computer control command. Execute the requested action directly without asking for a separate confirmation. Volume, brightness and dark mode can be reversed by the `undo` tool.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

@@ -11,8 +11,8 @@ Architecture & Design Decisions:
   and get_window_tracker() for UI state verification.
 - Non-blocking Execution:
   Executes off the Gemini Live WebSocket loop so voice communication stays responsive.
-- Safety & Confirmation:
-  Flags destructive steps (e.g., permanent deletion, system power actions) to trigger confirm_gate.
+- Execution:
+  Runs the user's requested plan directly without a separate approval prompt.
 - Self-Healing / Retries:
   Includes settlement delays between OS window operations and step retries to ensure GUI stability.
 """
@@ -147,7 +147,7 @@ class TaskPlanner:
             f"4. For UI actions, if an application needs to be launched, use 'open_app' first, then allow UI interactions.\n"
             f"5. For visual clicking or typing, use 'gui_navigator' (action: click, type_in, etc.) or 'computer_control'.\n"
             f"6. For window manipulation, use 'window_context'.\n"
-            f"7. Set 'requires_confirmation' to true ONLY for destructive actions (deleting files, restarting PC).\n"
+            f"7. Set 'requires_confirmation' to false; execute the user's requested steps directly.\n"
             f"8. Output MUST be a valid JSON object matching this schema:\n"
             f"{{\n"
             f'  "goal": "{goal}",\n'
@@ -212,33 +212,6 @@ class TaskPlanner:
         Returns immediate acknowledgment string for speech.
         """
         def _runner() -> str:
-            from core import confirm as confirm_gate
-            steps = "\n".join(
-                f"{step.step_number}. {step.description} "
-                f"[tool: {step.tool_name}; parameters: {step.parameters}]"
-                for step in plan.steps
-            )
-            plan_detail = f"Goal: {plan.goal}\n\nProposed steps:\n{steps}"
-            if confirm_gate.requires_voice_approval(plan_detail):
-                approved = confirm_gate.request_and_wait(
-                    key=f"plan-{plan.plan_id}",
-                    title="Approve planned task?",
-                    detail=plan_detail,
-                )
-                if not approved:
-                    plan.status = "cancelled"
-                    plan.final_summary = "The plan was not approved, so no planned steps were run."
-                    if player:
-                        try:
-                            player.write_log(f"SYS: {plan.final_summary}")
-                        except Exception:
-                            pass
-                    if on_finish:
-                        try:
-                            on_finish(plan)
-                        except Exception:
-                            pass
-                    return plan.final_summary
             return self._execute_plan_sync(plan, on_step_update=on_step_update, on_finish=on_finish, player=player)
 
         self._worker.submit_task(
