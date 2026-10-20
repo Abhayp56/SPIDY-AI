@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 from core.autonomous_worker import get_worker
 from core.hermes_bridge import get_hermes_bridge
+from core import confirm as confirm_gate
 
 logger = logging.getLogger("HermesWorkerAction")
 
@@ -58,48 +59,54 @@ def hermes_task_action(
             except Exception:
                 pass
 
-    # 1. Background Execution Mode
-    if background:
-        task_id = f"hermes_{uuid.uuid4().hex[:8]}"
-        worker = get_worker()
+    # Approval must return to the Live receiver immediately so it can hear a
+    # later spoken yes/no. Run only after the interface-issued gate resolves.
+    task_id = f"hermes_{uuid.uuid4().hex[:8]}"
+    worker = get_worker()
 
-        def _bg_execute() -> str:
-            _log(f"Starting background task: '{task}'")
-            res = bridge.run_task(
-                task_prompt=task,
-                on_status=_log,
-                on_tool_progress=_log,
-            )
-            final_resp = res.get("final_response") or "Task completed."
-            _log(f"Completed background task: {final_resp[:120]}")
-            return final_resp
+    def _progress(msg: str):
+        _log(msg)
+        worker.update_progress(task_id, msg)
 
-        worker.submit_task(task_id, f"{task[:40]}", _bg_execute)
-        return f"Sir, I have started working on that task in the background. I will notify you as soon as it completes."
-
-    # 2. Synchronous Direct Execution Mode
-    _log(f"Executing: '{task[:80]}'")
-    try:
+    def _execute() -> str:
+        _progress(f"Starting: {task[:180]}")
         result = bridge.run_task(
             task_prompt=task,
-            on_status=_log,
-            on_tool_progress=_log,
+            on_status=_progress,
+            on_tool_progress=_progress,
+        )
+        if result.get("status") != "success":
+            message = result.get("final_response") or "Hermes task failed."
+            _progress(f"Failed: {message[:180]}")
+            raise RuntimeError(message)
+        final_resp = result.get("final_response") or "Task completed."
+        _progress(f"Finished: {final_resp[:180]}")
+        return final_resp
+
+    def _start_after_approval() -> str:
+        mode = "background" if background else "approved"
+        worker.submit_task(task_id, f"Hermes: {task[:100]} ({mode})", _execute)
+        _log("Voice approval received. Starting the approved task.")
+        return "Task queued after voice approval."
+
+    if confirm_gate.requires_voice_approval(task):
+        # Critical or clearly deep work waits for a spoken decision.
+        return confirm_gate.request(
+            key=f"hermes-{uuid.uuid4().hex[:8]}",
+            title="Approve Hermes task?",
+            detail=f"Hermes will carry out this task:\n\n{task[:900]}",
+            run=_start_after_approval,
         )
 
-        if result.get("status") == "success":
-            resp = result.get("final_response") or "Task completed successfully."
-            model_info = result.get("model_used")
-            tools_used = result.get("tool_calls_count", 0)
-            _log(f"Success via {model_info} ({tools_used} tool calls)")
-            return resp
-        else:
-            err = result.get("final_response") or "Unknown error occurred."
-            _log(f"Execution failed: {err}")
-            return f"Execution encountered an issue: {err}"
-
+    # Routine and moderate tasks keep the quick path without an approval prompt.
+    if background:
+        worker.submit_task(task_id, f"Hermes: {task[:100]}", _execute)
+        return "I have started that task in the background and will report when it finishes."
+    try:
+        return _execute()
     except Exception as exc:
-        logger.error("Hermes execution failed with exception: %s", exc, exc_info=True)
-        return f"Sir, I encountered an unexpected error: {exc}"
+        logger.error("Hermes execution failed: %s", exc, exc_info=True)
+        return f"Execution encountered an issue: {exc}"
 
 
 TOOL = {

@@ -37,7 +37,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QLabel, QMenu,
-    QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget, QLineEdit,
+    QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget, QLineEdit, QMessageBox,
 )
 
 from memory.config_manager import (
@@ -73,13 +73,15 @@ class IslandWidget(QWidget):
       - SPEAKING:  Medium capsule (~410px) with red speaking indicator & speech waveform.
     """
 
-    COLLAPSED_W = 54
-    COLLAPSED_H = 4
-
-    EXPANDED_H  = 44
-    W_LISTENING = 380
-    W_THINKING  = 195
-    W_SPEAKING  = 270
+    # A calm, centered voice surface inspired by the supplied references.
+    WINDOW_W = 300
+    WINDOW_H = 78
+    EXPANDED_H = WINDOW_H
+    W_LISTENING = WINDOW_W
+    W_THINKING = WINDOW_W
+    W_SPEAKING = WINDOW_W
+    COLLAPSED_W = 44
+    COLLAPSED_H = 6
 
     def __init__(self, ui_controller: "JarvisIslandUI"):
         super().__init__(
@@ -95,16 +97,16 @@ class IslandWidget(QWidget):
         self._state = "SLEEPING"
         self._auto_hide = True
         self._is_expanded = False
-        self._progress = 0.0  # 0.0 = collapsed notch, 1.0 = fully expanded HUD
+        self._progress = 0.0
 
         self._audio_level = 0.0
+        self._target_input_level = 0.0
+        self._target_output_level = 0.0
         self._phase = 0.0
         self._spinner_angle = 0.0
         self._brand_text = (get_assistant_name() or "S.P.I.D.Y.").upper()
-        self._center_text = "LISTENING"
-
-        # Mouse Dragging State
-        self._drag_pos: Optional[QPoint] = None
+        self._center_text = "Hey, how can I help?"
+        self._activity = ""
 
         # Position Setup (Centered horizontally at screen top)
         scr = QApplication.primaryScreen()
@@ -120,13 +122,13 @@ class IslandWidget(QWidget):
 
         self._current_w = float(self.COLLAPSED_W)
         self._current_h = float(self.COLLAPSED_H)
-        self._current_y = float(self._screen_y)
+        self._current_y = self._screen_y
 
         self._update_geometry_pos()
 
         # Smooth Slide & Expansion Animation (240ms OutCubic)
         self._anim = QPropertyAnimation(self, b"anim_progress")
-        self._anim.setDuration(240)
+        self._anim.setDuration(260)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         # 60 FPS Animation Timer (Waveform oscillation, eye breathing, spinner)
@@ -147,11 +149,10 @@ class IslandWidget(QWidget):
     def set_anim_progress(self, val: float):
         self._progress = max(0.0, min(1.0, val))
 
-        target_expanded_w = self._get_target_width_for_state()
-        self._current_w = self.COLLAPSED_W + (target_expanded_w - self.COLLAPSED_W) * self._progress
+        self._current_w = self.COLLAPSED_W + (self.WINDOW_W - self.COLLAPSED_W) * self._progress
         self._current_h = self.COLLAPSED_H + (self.EXPANDED_H - self.COLLAPSED_H) * self._progress
-        # Sits flush at screen_y when collapsed; slides down 18px below bezel when expanded
-        self._current_y = self._screen_y + (18.0 * self._progress)
+        # The compact card stays attached to the top edge in every state.
+        self._current_y = self._screen_y
 
         self._update_geometry_pos()
         self.update()
@@ -172,21 +173,22 @@ class IslandWidget(QWidget):
 
     # ── Expansion & Collapse Controls ─────────────────────────────────────────
     def expand(self, keep_alive: bool = False):
-        """Expands the bar downwards from the top edge."""
+        """Smoothly reveal the compact panel from its top-center idle bar."""
         self._collapse_timer.stop()
-        if not self._is_expanded or self._progress < 0.95:
-            self._is_expanded = True
-            self._anim.stop()
-            self._anim.setStartValue(self._progress)
-            self._anim.setEndValue(1.0)
-            self._anim.start()
-
-        if self._auto_hide and not keep_alive and self._state != "SPEAKING":
-            self._collapse_timer.start(2800)
+        if self._is_expanded:
+            return  # audio callbacks arrive frequently; do not restart the animation
+        self._is_expanded = True
+        self.show()
+        self._anim.stop()
+        self._anim.setStartValue(self._progress)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+        self.update()
 
     def collapse(self):
-        """Smoothly slides the bar back UP into the hidden top dock."""
-        if not self._auto_hide or self._state == "SPEAKING":
+        """Shrink to the small always-visible bar at the top center."""
+        self._collapse_timer.stop()
+        if not self._is_expanded and self._progress <= 0.001:
             return
         self._is_expanded = False
         self._anim.stop()
@@ -195,10 +197,9 @@ class IslandWidget(QWidget):
         self._anim.start()
 
     def schedule_collapse(self, delay_ms: int = 2500):
-        """Schedules the bar to slide up after silence."""
         self._collapse_timer.stop()
-        if self._auto_hide:
-            self._collapse_timer.start(delay_ms)
+        if self._auto_hide and self._is_expanded:
+            self._collapse_timer.start(max(0, delay_ms))
 
     def _on_collapse_timeout(self):
         if self._state == "SPEAKING":
@@ -209,60 +210,43 @@ class IslandWidget(QWidget):
     def set_state(self, state: str):
         prev = self._state
         self._state = state
+        if state != "SPEAKING":
+            self._target_output_level = 0.0
         self._brand_text = (self.ui_ctrl.assistant_name or "S.P.I.D.Y.").upper()
 
         if state == "SPEAKING":
-            self._center_text = "SPEAKING"
-            # Keep expanded while speaking
+            self._activity = ""
             self.expand(keep_alive=True)
         elif state == "THINKING":
-            self._center_text = "THINKING..."
+            self._activity = ""
             self.expand(keep_alive=True)
         elif state == "LISTENING":
-            self._center_text = "LISTENING"
-            if prev == "SPEAKING":
-                # As soon as speaking finishes, schedule smooth tuck away after silence
-                self.schedule_collapse(2500)
-            elif not self._is_expanded:
-                # Standby idle: stays hidden in notch until speech
-                pass
+            self._activity = ""
+            if prev in ("SPEAKING", "THINKING", "WORKING"):
+                self.schedule_collapse(900)
         elif state == "SLEEPING":
-            self._center_text = "STANDBY"
-            self.schedule_collapse(400)
+            self._activity = ""
+            self.collapse()
         elif state == "MUTED":
-            self._center_text = "MUTED"
-            self.expand()
-            self.schedule_collapse(1800)
-
-        # Trigger width update if already expanded
-        if self._is_expanded and self._progress > 0.8:
-            self._anim.stop()
-            self._anim.setStartValue(self._progress)
-            self._anim.setEndValue(1.0)
-            self._anim.start()
+            self._activity = ""
+            self.collapse()
 
         self.update()
 
     def set_audio_level(self, lvl: float):
-        self._audio_level = max(0.0, min(1.0, lvl))
+        self._target_input_level = max(0.0, min(1.0, lvl))
         # When user speaks into the microphone while idle or listening:
         # immediately slide down and expand into the full HUD!
         if lvl > 0.06 and not self.ui_ctrl.muted and self._state != "SPEAKING":
-            if not self._is_expanded or self._progress < 0.8:
-                self.expand()
-            else:
-                # Refresh silence timer while user continues speaking
-                self._collapse_timer.stop()
-                if self._auto_hide:
-                    self._collapse_timer.start(2800)
+            self.expand()
+            self.schedule_collapse(1100)
 
-    def set_display_text(self, text: str):
-        """Updates display text and expands if needed."""
-        self._center_text = text.strip()
-        self.expand(keep_alive=(self._state in ("SPEAKING", "THINKING")))
-        self.update()
+    def set_output_audio_level(self, lvl: float):
+        self._target_output_level = max(0.0, min(1.0, lvl))
 
     def _on_frame(self):
+        target = max(self._target_input_level, self._target_output_level)
+        self._audio_level += (target - self._audio_level) * 0.34
         self._phase += 0.08
         if self._phase > 628.3:
             self._phase = 0.0
@@ -272,63 +256,113 @@ class IslandWidget(QWidget):
 
         self.update()
 
+    def set_display_text(self, text: str):
+        """Updates display text and expands if needed."""
+        value = text.strip()
+        self._center_text = value or "Hey, how can I help?"
+        self.expand(keep_alive=(self._state in ("SPEAKING", "THINKING")))
+        self.update()
+
     # ── Paint Pipeline ────────────────────────────────────────────────────────
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-
-        w = float(self.width())
-        h = float(self.height())
-        cx = w / 2.0
-
-        # ── 1. If Collapsed (Hidden Top Notch) ────────────────────────────────
-        if self._progress < 0.15:
-            self._draw_collapsed_notch(p, cx, w, h)
-            return
-
-        # ── 2. Expanded HUD Pill ──────────────────────────────────────────────
-        rect = QRectF(0.5, 0.5, w - 1.0, h - 1.0)
-        self._draw_hud_pill(p, rect)
-
-        # Content opacity smoothly fades in with progress
-        content_alpha = int(255 * max(0.0, (self._progress - 0.20) / 0.80))
-        if content_alpha <= 0:
-            return
-
-        # ── Left: Spider Avatar HUD Dial ──────────────────────────────────────
-        avatar_r = 15.0
-        avatar_cx = 14.0 + avatar_r
-        avatar_cy = h / 2.0
-        self._draw_spider_avatar(p, QPointF(avatar_cx, avatar_cy), avatar_r, content_alpha)
-
-        # ── Brand Title & Status Indicator ────────────────────────────────────
-        text_x = avatar_cx + avatar_r + 10.0
-        self._draw_brand_and_status(p, text_x, h, content_alpha)
-
-        # ── State-Specific Middle Visualizers ─────────────────────────────────
-        if self._state == "LISTENING" and w >= 280:
-            wave_cx = w * 0.58
-            wave_cy = h / 2.0
-            self._draw_waveform(p, QPointF(wave_cx, wave_cy), 110.0, 26.0, is_large=True, alpha=content_alpha)
-
-            mic_btn_r = 12.5
-            mic_btn_cx = w - 42.0
-            mic_btn_cy = h / 2.0
-            self._draw_microphone_button(p, QPointF(mic_btn_cx, mic_btn_cy), mic_btn_r, content_alpha)
-
-        elif self._state == "SPEAKING" and w >= 220:
-            wave_cx = w - 62.0
-            wave_cy = h / 2.0
-            self._draw_waveform(p, QPointF(wave_cx, wave_cy), 65.0, 22.0, is_large=False, alpha=content_alpha)
-
-        # ── Far Right Menu Dots (•••) ─────────────────────────────────────────
-        dots_x = w - 16.0
-        dots_cy = h / 2.0
-        p.setBrush(QBrush(QColor(0, 242, 255, int(content_alpha * 0.85))))
+        # Leave the area around the card fully transparent so the desktop shows through.
+        panel = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
         p.setPen(Qt.PenStyle.NoPen)
-        for j in (-3, 0, 3):
-            p.drawEllipse(QPointF(dots_x + j, dots_cy), 1.2, 1.2)
+        if self._progress < 0.18:
+            p.setBrush(QColor("#080808"))
+            p.drawRoundedRect(panel, panel.height() / 2, panel.height() / 2)
+            p.setBrush(QColor(220, 220, 225, 175))
+            p.drawRoundedRect(QRectF(panel.center().x() - 8, panel.center().y() - 1, 16, 2), 1, 1)
+            return
+        p.setBrush(QColor("#050505"))
+        # The panel shares its top edge with the screen and curves inward
+        # through soft shoulders, like a centered notch merging into a header.
+        shoulder = min(40.0, panel.width() * 0.14)
+        top_lip = min(11.0, panel.height() * 0.14)
+        curve_drop = min(23.0, panel.height() * 0.31)
+        lower_radius = min(16.0, panel.height() * 0.22)
+        left, top = panel.left(), panel.top()
+        right, bottom = panel.right(), panel.bottom()
+        shape = QPainterPath()
+        shape.moveTo(left, top)
+        shape.lineTo(right, top)
+        shape.lineTo(right, top + top_lip)
+        shape.cubicTo(right, top + top_lip + curve_drop * 0.85,
+                      right - shoulder, top + top_lip + curve_drop * 0.35,
+                      right - shoulder, top + top_lip + curve_drop)
+        shape.lineTo(right - shoulder, bottom - lower_radius)
+        shape.cubicTo(right - shoulder, bottom - lower_radius * 0.35,
+                      right - shoulder - lower_radius * 0.35, bottom,
+                      right - shoulder - lower_radius, bottom)
+        shape.lineTo(left + shoulder + lower_radius, bottom)
+        shape.cubicTo(left + shoulder + lower_radius * 0.35, bottom,
+                      left + shoulder, bottom - lower_radius * 0.35,
+                      left + shoulder, bottom - lower_radius)
+        shape.lineTo(left + shoulder, top + top_lip + curve_drop)
+        shape.cubicTo(left + shoulder, top + top_lip + curve_drop * 0.35,
+                      left, top + top_lip + curve_drop * 0.85,
+                      left, top + top_lip)
+        shape.closeSubpath()
+        p.drawPath(shape)
+
+        # Model/assistant label, kept deliberately quiet like the reference.
+        p.setPen(QColor("#777777"))
+        p.setFont(QFont("Segoe UI", 6))
+        p.drawText(QPointF(panel.x() + 12, panel.y() + 13), self._brand_text.title())
+
+        # Centered soft waveform. Heights breathe with the microphone and state.
+        center_x, center_y = self.width() / 2.0, panel.y() + 28
+        heights = [4, 7, 11, 17, 12, 15, 10, 6, 4]
+        gap = 6
+        active = self._state in ("LISTENING", "SPEAKING", "THINKING", "WORKING")
+        for i, base in enumerate(heights):
+            wobble = (0.5 + 0.5 * math.sin(self._phase + i * 0.85)) if active else 0.22
+            gain = 0.58 + wobble * 0.35
+            if self._state in ("LISTENING", "SPEAKING"):
+                gain += self._audio_level * 1.1
+            bar_h = base * gain
+            x = center_x + (i - (len(heights) - 1) / 2) * gap
+            # Dim halo track with a luminous white core, matching the supplied voice visual.
+            p.setBrush(QColor(255, 255, 255, 24))
+            p.drawRoundedRect(QRectF(x - 4.5, center_y - base * 0.75, 9, base * 1.5), 4.5, 4.5)
+            p.setBrush(QColor(244, 244, 250, 235 if active else 190))
+            p.drawRoundedRect(QRectF(x - 3.5, center_y - bar_h / 2, 7, bar_h), 3.5, 3.5)
+
+        caption = self._center_text or "Hey, how can I help?"
+        p.setPen(QColor("#F1F1F1"))
+        p.setFont(QFont("Segoe UI", 8))
+        p.drawText(QRectF(panel.x() + 12, center_y + 15, panel.width() - 24, 16),
+                   Qt.AlignmentFlag.AlignCenter, caption[:32])
+
+        # Bottom activity capsule: state and latest activity use the reference's
+        # neutral text with a small state-colored pixel mark.
+        status = {"SLEEPING": "Ready", "LISTENING": "Listening", "THINKING": "Thinking",
+                  "WORKING": "Working", "SPEAKING": "Responding", "MUTED": "Muted"}.get(self._state, self._state.title())
+        color = {"LISTENING": "#8EC7F5", "THINKING": "#FF8E8E", "WORKING": "#FF8E8E",
+                 "SPEAKING": "#8EC7F5", "MUTED": "#F4AE54"}.get(self._state, "#B8B8B8")
+        status_y = panel.bottom() - 10
+        p.setPen(QColor("#858585"))
+        p.setFont(QFont("Segoe UI", 6))
+        p.drawText(QRectF(panel.x() + 12, status_y - 10, panel.width() - 24, 10),
+                   Qt.AlignmentFlag.AlignCenter, self._activity[:64])
+        p.setBrush(QColor(color))
+        p.drawRoundedRect(QRectF(center_x - 35, status_y + 2, 5, 5), 1.5, 1.5)
+        p.setPen(QColor("#F2F2F2"))
+        p.setFont(QFont("Segoe UI", 7))
+        p.drawText(QRectF(center_x - 25, status_y - 4, 70, 15), Qt.AlignmentFlag.AlignLeft, status)
+
+        # Stop/listen control, shown as the same warm outlined ring as the sample.
+        stop_x, stop_y = panel.right() - 14, panel.bottom() - 14
+        stop_color = QColor("#F4AE54") if self._state in ("LISTENING", "SPEAKING") else QColor("#9A9A9A")
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(stop_color, 2))
+        p.drawEllipse(QPointF(stop_x, stop_y), 6, 6)
+        p.setBrush(stop_color)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(QRectF(stop_x - 2, stop_y - 2, 4, 4), 1, 1)
 
     def _draw_collapsed_notch(self, p: QPainter, cx: float, w: float, h: float):
         """Draws the minimal glowing top bezel micro-notch when user doesn't speak."""
@@ -610,9 +644,7 @@ class IslandWidget(QWidget):
 
     # ── Hover & Mouse Interactions ───────────────────────────────────────────
     def enterEvent(self, e):
-        """Hovering mouse over the top notch expands it smoothly."""
-        if self._auto_hide and not self._is_expanded:
-            self.expand()
+        """Hover does not reveal the panel; speech activity controls it."""
         e.accept()
 
     def mousePressEvent(self, e):
@@ -620,6 +652,15 @@ class IslandWidget(QWidget):
             pt = e.position().toPoint()
             w = self.width()
             h = self.height()
+
+            # Reference-style stop control: interrupt live speech, otherwise wake.
+            if pt.x() > w - 32 and pt.y() > h - 32:
+                if self._state == "SPEAKING" and self.ui_ctrl.on_interrupt:
+                    self.ui_ctrl.on_interrupt()
+                elif self.ui_ctrl.on_wake_manual:
+                    self.ui_ctrl.on_wake_manual()
+                e.accept()
+                return
 
             # If clicked while collapsed: expand immediately!
             if not self._is_expanded or self._progress < 0.5:
@@ -659,8 +700,7 @@ class IslandWidget(QWidget):
                 e.accept()
                 return
 
-            # 4. Drag widget anywhere
-            self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            # The compact panel is fixed to the upper-center anchor.
             e.accept()
 
         elif e.button() == Qt.MouseButton.RightButton:
@@ -668,15 +708,10 @@ class IslandWidget(QWidget):
             e.accept()
 
     def mouseMoveEvent(self, e):
-        if self._drag_pos is not None and e.buttons() & Qt.MouseButton.LeftButton:
-            new_pos = e.globalPosition().toPoint() - self._drag_pos
-            self._screen_x = new_pos.x() - (self._screen_w - int(self._current_w)) // 2
-            self._current_y = new_pos.y()
-            self.move(new_pos)
-            e.accept()
+        e.ignore()
 
     def mouseReleaseEvent(self, e):
-        self._drag_pos = None
+        e.accept()
 
     def _show_context_menu(self, global_pos: QPoint):
         menu = QMenu(self)
@@ -731,6 +766,12 @@ class IslandWidget(QWidget):
         autostart_on = is_autostart_enabled()
         auto_act = menu.addAction("✓  Auto-Start on Boot" if autostart_on else "○  Auto-Start on Boot")
         auto_act.triggered.connect(lambda: set_autostart_enabled(not autostart_on))
+
+        menu.addSeparator()
+        activity_act = menu.addAction("📋  Task Activity")
+        activity_act.triggered.connect(self.ui_ctrl.open_task_activity)
+        memory_act = menu.addAction("🧠  Memory Review")
+        memory_act.triggered.connect(self.ui_ctrl.open_memory_review)
 
         menu.addSeparator()
         switch_orb = menu.addAction("🔮  Switch to Desktop Orb Mode")
@@ -823,8 +864,11 @@ class JarvisIslandUI(QObject):
     _alert_sig = pyqtSignal(str)
     _text_sig = pyqtSignal(str)
     _audio_sig = pyqtSignal(float)
+    _output_audio_sig = pyqtSignal(float)
     _expand_sig = pyqtSignal(bool)
     _collapse_sig = pyqtSignal(int)
+    _confirm_sig = pyqtSignal(str, str)
+    _confirm_hide_sig = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -855,6 +899,9 @@ class JarvisIslandUI(QObject):
 
         # Instantiate Island Widget
         self._island = IslandWidget(self)
+        self._confirm_box = None
+        self._task_activity_dialog = None
+        self._memory_review_dialog = None
         self.root = _RootShim(self._app)
 
         # Wire Qt signals across thread boundaries
@@ -862,13 +909,17 @@ class JarvisIslandUI(QObject):
         self._text_sig.connect(self._island.set_display_text)
         self._log_sig.connect(self._on_log)
         self._audio_sig.connect(self._island.set_audio_level)
+        self._output_audio_sig.connect(self._island.set_output_audio_level)
         self._expand_sig.connect(self._island.expand)
         self._collapse_sig.connect(self._island.schedule_collapse)
+        self._confirm_sig.connect(self._show_confirm_dialog)
+        self._confirm_hide_sig.connect(self._hide_confirm_dialog)
 
         # Global Hotkey Listener
         self._hotkey = GlobalIslandHotkey(self._on_hotkey_triggered)
         self._hotkey.start()
 
+        # Keep the tiny top-center bar visible until speech reveals the panel.
         self._island.show()
         self._island.raise_()
 
@@ -903,6 +954,9 @@ class JarvisIslandUI(QObject):
     def set_audio_level(self, level: float) -> None:
         self._audio_sig.emit(float(level))
 
+    def set_output_audio_level(self, level: float) -> None:
+        self._output_audio_sig.emit(float(level))
+
     def write_log(self, text: str):
         self._log_sig.emit(text)
 
@@ -912,19 +966,20 @@ class JarvisIslandUI(QObject):
             speech = clean[4:].strip()
             if speech:
                 self._text_sig.emit(f"You: {speech}")
+                self._island._activity = "You spoke"
                 self._expand_sig.emit(False)
                 self._collapse_sig.emit(3500)
         elif clean.startswith(f"{self._assistant_name}:"):
             speech = clean[len(self._assistant_name) + 1:].strip()
             if speech:
                 self._text_sig.emit(speech)
+                self._island._activity = "Assistant response"
                 self._expand_sig.emit(True)
-        elif clean.startswith("SYS: Awake"):
-            self._text_sig.emit("LISTENING")
-            self._expand_sig.emit(False)
-        elif clean.startswith("SYS: Sleeping"):
-            self._text_sig.emit("STANDBY")
-            self._collapse_sig.emit(500)
+        elif clean.startswith("SYS:"):
+            detail = clean[4:].strip()
+            if detail:
+                self._island._activity = detail[:64]
+                self._island.update()
 
     def wait_for_api_key(self):
         if not self._ready:
@@ -948,12 +1003,60 @@ class JarvisIslandUI(QObject):
     def prompt_reconfig(self):
         pass
 
+    def open_task_activity(self):
+        from ui_productivity import TaskActivityDialog
+        if self._task_activity_dialog is None:
+            self._task_activity_dialog = TaskActivityDialog(self._island)
+        self._task_activity_dialog.refresh()
+        self._task_activity_dialog.show()
+        self._task_activity_dialog.raise_()
+        self._task_activity_dialog.activateWindow()
+
+    def open_memory_review(self):
+        from ui_productivity import MemoryReviewDialog
+        if self._memory_review_dialog is None:
+            self._memory_review_dialog = MemoryReviewDialog(self._island)
+        self._memory_review_dialog.refresh()
+        self._memory_review_dialog.show()
+        self._memory_review_dialog.raise_()
+        self._memory_review_dialog.activateWindow()
+
     def show_confirm(self, title: str, detail: str) -> None:
-        self._text_sig.emit(f"Confirm: {title}")
-        self._expand_sig.emit(True)
+        self._confirm_sig.emit(str(title)[:120], str(detail)[:1000])
 
     def hide_confirm(self) -> None:
-        self._collapse_sig.emit(800)
+        self._confirm_hide_sig.emit()
+
+    def _show_confirm_dialog(self, title: str, detail: str) -> None:
+        self._hide_confirm_dialog()
+        box = QMessageBox(self._island)
+        box.setWindowTitle("S.P.I.D.Y. — Confirm Action")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(title)
+        box.setInformativeText(detail)
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        box.button(QMessageBox.StandardButton.Yes).setText("CONFIRM")
+        box.button(QMessageBox.StandardButton.No).setText("CANCEL")
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self._confirm_box = box
+        box.finished.connect(self._on_confirm_dialog_finished)
+        box.show()
+
+    def _on_confirm_dialog_finished(self, result: int) -> None:
+        from core import confirm as confirm_gate
+        box, self._confirm_box = self._confirm_box, None
+        if box is None:
+            return
+        confirm_gate.resolve(result == QMessageBox.StandardButton.Yes.value)
+
+    def _hide_confirm_dialog(self) -> None:
+        box, self._confirm_box = self._confirm_box, None
+        if box is not None:
+            box.blockSignals(True)
+            box.close()
 
     def trigger_alert(self, msg: str) -> None:
         self._text_sig.emit(f"Alert: {msg[:30]}")

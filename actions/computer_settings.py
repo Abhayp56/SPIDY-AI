@@ -696,7 +696,7 @@ ACTION_MAP: dict[str, callable] = {
 # Two lists now, and the split is about reversibility, not about how alarming
 # the word sounds:
 #
-#   _IRREVERSIBLE — a human presses a button on the HUD. Nothing else.
+#   _IRREVERSIBLE — a human must approve by voice before the action runs.
 #   everything else — done immediately, with an undo pushed if it can be undone.
 #
 # Asking before every action is what makes an assistant unusable, and every
@@ -843,17 +843,15 @@ def computer_settings(
         player.write_log(f"[Settings] {action}")
 
     # ── The gate ─────────────────────────────────────────────────────────────
-    # A human presses a button, or this does not happen. The model can no longer
-    # write its own permission slip, and the action itself is handed to the UI
-    # rather than performed here — so returning early is not "declining", it is
-    # "parked until someone says yes".
+    # The model cannot authorize its own action. The user must approve by voice;
+    # the action itself is parked until the app hears a clear yes.
     if action in _IRREVERSIBLE:
         title, detail = _IRREVERSIBLE[action]
         func = ACTION_MAP.get(action)
         if func is None:
             return f"Unknown action: '{raw_action}'."
         if confirm.pending_title():
-            return ("There is already a confirmation waiting on screen. "
+            return ("There is already a voice confirmation waiting. "
                     "Ask the user to answer that one first.")
         return confirm.request(
             key=action, title=title, detail=detail,
@@ -943,7 +941,7 @@ def computer_settings(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "computer_settings",
-    "description": "Controls the computer: volume, brightness, window management, keyboard shortcuts, typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. Use for ANY single computer control command. restart, shutdown and toggle_wifi put a confirmation on the user's screen and do NOT happen until they press it — never claim they are done. Volume, brightness and dark mode can be reversed with the `undo` tool.",
+    "description": "Controls the computer: volume, brightness, window management, keyboard shortcuts, typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. Use for ANY single computer control command. Restart, shutdown, and turning WiFi off require the user to approve by voice; do not claim they are done before approval. Volume, brightness and dark mode can be reversed by the `undo` tool.",
     "parameters": {
         "type": "OBJECT",
         "properties": {

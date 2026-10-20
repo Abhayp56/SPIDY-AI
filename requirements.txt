@@ -62,6 +62,9 @@ qrcode[pil]>=7,<9
 # disables exactly one plugin and never touches the rest of the app.
 google-api-python-client     # gmail_control, calendar_control — OAuth
 google-auth-oauthlib         # gmail_control, calendar_control — OAuth
+msal>=1.28,<2               # outlook_mail — delegated Microsoft Graph OAuth
+msal-extensions>=1.2,<2     # outlook_mail — OS-protected persistent token cache
+spotipy>=2.24,<3            # spotify_control — Spotify Web API OAuth
 tinytuya                     # home_assistant — Tuya / Smart Life bulbs
 paho-mqtt                    # printer_control — MQTT printers
 openpyxl                     # excel_writer — spreadsheet output

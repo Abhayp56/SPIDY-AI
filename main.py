@@ -1,6 +1,21 @@
 import platform as _platform
 import subprocess as _subprocess
 
+# Windows may invoke the assistant from more than one startup registration.
+# Keep a named mutex for the lifetime of this process so only the first launch
+# continues into the UI and audio initialization.
+if _platform.system() == "Windows":
+    import ctypes as _ctypes
+
+    _kernel32 = _ctypes.windll.kernel32
+    _kernel32.CreateMutexW.restype = _ctypes.c_void_p
+    _kernel32.CreateMutexW.argtypes = (_ctypes.c_void_p, _ctypes.c_int, _ctypes.c_wchar_p)
+    _kernel32.CloseHandle.argtypes = (_ctypes.c_void_p,)
+    _startup_mutex = _kernel32.CreateMutexW(None, False, "Local\\SPIDY_AI_Single_Instance")
+    if _startup_mutex and _ctypes.windll.kernel32.GetLastError() == 183:
+        _kernel32.CloseHandle(_startup_mutex)
+        raise SystemExit(0)
+
 # ── Nuclear: force CREATE_NO_WINDOW on EVERY subprocess call on Windows ───────
 # This patches Popen itself, so no per-file flag is needed anywhere.
 if _platform.system() == "Windows":
@@ -600,6 +615,13 @@ def _keep_context_of(exc: BaseException) -> bool:
             if _is_reconnect_signal(sub):
                 return _keep_context_of(sub)
     return True
+
+
+def _exception_text(exc: BaseException) -> str:
+    """Include nested TaskGroup errors when classifying a failed Live session."""
+    if isinstance(exc, BaseExceptionGroup):
+        return " | ".join(_exception_text(sub) for sub in exc.exceptions)
+    return f"{type(exc).__name__}: {exc}"
 
 
 class JarvisLive:
@@ -1621,6 +1643,7 @@ class JarvisLive:
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
         out_buf, in_buf = [], []
+        in_started_at = None
 
         try:
             while True:
@@ -1675,6 +1698,8 @@ class JarvisLive:
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
+                                if not in_buf:
+                                    in_started_at = time.monotonic()
                                 in_buf.append(txt)
                                 self._last_user_speech = time.monotonic()
 
@@ -1687,12 +1712,14 @@ class JarvisLive:
                             if self._interrupted:
                                 self._interrupted = False
                                 in_buf  = []
+                                in_started_at = None
                                 out_buf = []
                                 self._visemes.reset()
                                 continue
 
                             full_in = " ".join(in_buf).strip()
                             if full_in:
+                                confirm_gate.resolve_from_voice(full_in, in_started_at)
                                 self._last_user_input = full_in
                                 self._last_out_logged = ""   # new exchange
                                 self.ui.write_log(f"You: {full_in}")
@@ -1704,6 +1731,7 @@ class JarvisLive:
                                         "ts": datetime.now().isoformat(),
                                     }))
                             in_buf = []
+                            in_started_at = None
 
                             full_out = " ".join(out_buf).strip()
                             # Second line of defence: even if a repeat slips
@@ -1774,7 +1802,10 @@ class JarvisLive:
                         await self._flush_pending_vision()
         except Exception as e:
             print(f"[JARVIS] ❌ Recv: {e}")
-            traceback.print_exc()
+            # Expected Live API 1011 resets are handled by the outer reconnect
+            # loop; a full traceback there obscures the useful retry message.
+            if "1011" not in str(e) and "internal error" not in str(e).lower():
+                traceback.print_exc()
             raise
 
     async def _play_audio(self):
@@ -1858,6 +1889,10 @@ class JarvisLive:
                     pcm = np.frombuffer(bytes(batch), dtype=np.int16)
                     hop = _VIS_HOP / RECEIVE_SAMPLE_RATE
                     frames = _pcm_visemes(pcm, sr=RECEIVE_SAMPLE_RATE)
+                    # Feed the assistant's actual playback loudness into the
+                    # voice panel even when viseme frames are also available.
+                    if hasattr(self.ui, "set_output_audio_level"):
+                        self.ui.set_output_audio_level(_pcm_level(pcm))
                     # When does this batch become audible? The stream was
                     # started at launch and its callback has been pulling
                     # silence ever since, so the first bytes of a reply reach
@@ -2286,6 +2321,7 @@ class JarvisLive:
             show = self.ui.show_confirm,
             hide = self.ui.hide_confirm,
             log  = self.ui.write_log,
+            ask  = self.plugin_say,
         )
         set_trim_notifier(self.ui.write_log)
 
@@ -2313,7 +2349,9 @@ class JarvisLive:
         while True:
             try:
                 print("[JARVIS] Connecting...")
-                self.ui.set_state("THINKING")
+                # Keep the voice panel hidden during connection setup; it opens
+                # for speech activity or when the assistant starts a response.
+                self.ui.set_state("SLEEPING")
                 # Pick the rung to open the conversation on. A model resting
                 # off a quota limit is skipped; the name is published back to
                 # LIVE_MODEL so plugins follow whatever is actually in use.
@@ -2417,6 +2455,7 @@ class JarvisLive:
                 # start shutdown — resulting in "executor after shutdown" errors).
                 # Voluntary reconnect (voice change) — not an error. Rebuild the
                 # session immediately with no backoff and no scary logs.
+                err_str = _exception_text(e)
                 if _is_reconnect_signal(e):
                     print("[JARVIS] Voluntary reconnect requested.")
                     if not _keep_context_of(e):
@@ -2434,20 +2473,22 @@ class JarvisLive:
                 # once and let the next attempt start clean.
                 if (
                     _resumed_with and (
-                        "resum" in str(e).lower()
-                        or "handle" in str(e).lower()
-                        or "INVALID_ARGUMENT" in str(e)
-                        or "NOT_FOUND" in str(e)
+                        "resum" in err_str.lower()
+                        or "handle" in err_str.lower()
+                        or "INVALID_ARGUMENT" in err_str
+                        or "NOT_FOUND" in err_str
                     )
-                ) or "1011" in str(e) or "internal error" in str(e).lower():
-                    print("[JARVIS] 🔗 Resumption handle rejected or server reset (1011) — starting a fresh session")
+                ) or "1011" in err_str or "internal error" in err_str.lower():
+                    print("[JARVIS] Live server ended the session (1011); reconnecting with a fresh session.")
                     self.ui.write_log("SYS: Resetting connection — starting fresh.")
                     self._resume_handle = None
-                    self._conn_backoff = 0
+                    # A 1011 is an upstream Live server failure. Back off to
+                    # avoid a rapid reconnect loop when the service is unhealthy.
+                    self._conn_backoff = min(max(getattr(self, "_conn_backoff", 0) * 2, 3), 30)
+                    await asyncio.sleep(self._conn_backoff)
                     continue
 
-                err_str = str(e)
-                print(f"[JARVIS] Error ({type(e).__name__}): {e}")
+                print(f"[JARVIS] Error: {err_str}")
                 traceback.print_exc()
 
                 # Out of quota, or this model is not available to this key —

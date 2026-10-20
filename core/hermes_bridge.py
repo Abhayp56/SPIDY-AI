@@ -343,6 +343,7 @@ class HermesBridge:
             f"Desktop='{desktop_dir}', Temp Directory='{temp_dir}']\n"
             f"EXECUTION GUIDELINES:\n"
             f"- SPEED & DECISIVENESS: Call the required tool immediately in Turn 1 without conversational chatter or delay.\n"
+            f"- VERIFY RESULTS: After actions that change files, settings, or desktop state, use an appropriate read/check tool to confirm the result before claiming success. If verification is unavailable or inconclusive, state that clearly and do not present the outcome as confirmed.\n"
             f"- EXPLORER: Do NOT open File Explorer unless the user explicitly requested 'open folder' or 'show in explorer'. When creating/listing files or folders, perform the operation quietly.\n"
             f"- RECYCLE BIN: Never run recursive commands like 'Get-ChildItem -Recurse C:\\$Recycle.Bin' as it hangs permissions. For Recycle Bin queries, use PowerShell COM: `powershell -Command \"(New-Object -ComObject Shell.Application).Namespace(0x0a).Items() | Select-Object Name, Size, Path\"`.\n"
             f"- For terminal commands, use Windows CMD or PowerShell (e.g. 'dir', '$env:TEMP'). Never use Unix 'ls' or '$TMPDIR'.\n"

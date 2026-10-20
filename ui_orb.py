@@ -446,6 +446,12 @@ class OrbWidget(QWidget):
         hud_act.triggered.connect(self._switch_to_hud)
 
         menu.addSeparator()
+        activity_act = menu.addAction("📋  Task Activity")
+        activity_act.triggered.connect(self.ui_ctrl.open_task_activity)
+        memory_act = menu.addAction("🧠  Memory Review")
+        memory_act.triggered.connect(self.ui_ctrl.open_memory_review)
+
+        menu.addSeparator()
 
         # Quit
         quit_act = menu.addAction("✕  Quit Assistant")
@@ -705,6 +711,8 @@ class JarvisOrbUI(QObject):
 
         # Instantiate Orb Widget & Ghost Target Overlay
         self._orb = OrbWidget(self)
+        self._task_activity_dialog = None
+        self._memory_review_dialog = None
         self._ghost_overlay = GhostTargetOverlay()
         self.root = _RootShim(self._app)
 
@@ -796,6 +804,24 @@ class JarvisOrbUI(QObject):
 
     def prompt_reconfig(self):
         self._reconfig_sig.emit()
+
+    def open_task_activity(self):
+        from ui_productivity import TaskActivityDialog
+        if self._task_activity_dialog is None:
+            self._task_activity_dialog = TaskActivityDialog(self._orb)
+        self._task_activity_dialog.refresh()
+        self._task_activity_dialog.show()
+        self._task_activity_dialog.raise_()
+        self._task_activity_dialog.activateWindow()
+
+    def open_memory_review(self):
+        from ui_productivity import MemoryReviewDialog
+        if self._memory_review_dialog is None:
+            self._memory_review_dialog = MemoryReviewDialog(self._orb)
+        self._memory_review_dialog.refresh()
+        self._memory_review_dialog.show()
+        self._memory_review_dialog.raise_()
+        self._memory_review_dialog.activateWindow()
 
     def _do_prompt_reconfig(self):
         dlg = KeyConfigDialog(self._orb)

@@ -42,7 +42,7 @@ class PlanStep:
     parameters: Dict[str, Any] = field(default_factory=dict)
     requires_confirmation: bool = False
     delay_after: float = 0.8
-    status: str = "pending"  # "pending", "running", "completed", "failed", "skipped"
+    status: str = "pending"  # "pending", "running", "completed", "failed", "skipped", "cancelled"
     result: str = ""
     error: str = ""
 
@@ -212,6 +212,33 @@ class TaskPlanner:
         Returns immediate acknowledgment string for speech.
         """
         def _runner() -> str:
+            from core import confirm as confirm_gate
+            steps = "\n".join(
+                f"{step.step_number}. {step.description} "
+                f"[tool: {step.tool_name}; parameters: {step.parameters}]"
+                for step in plan.steps
+            )
+            plan_detail = f"Goal: {plan.goal}\n\nProposed steps:\n{steps}"
+            if confirm_gate.requires_voice_approval(plan_detail):
+                approved = confirm_gate.request_and_wait(
+                    key=f"plan-{plan.plan_id}",
+                    title="Approve planned task?",
+                    detail=plan_detail,
+                )
+                if not approved:
+                    plan.status = "cancelled"
+                    plan.final_summary = "The plan was not approved, so no planned steps were run."
+                    if player:
+                        try:
+                            player.write_log(f"SYS: {plan.final_summary}")
+                        except Exception:
+                            pass
+                    if on_finish:
+                        try:
+                            on_finish(plan)
+                        except Exception:
+                            pass
+                    return plan.final_summary
             return self._execute_plan_sync(plan, on_step_update=on_step_update, on_finish=on_finish, player=player)
 
         self._worker.submit_task(
@@ -243,6 +270,9 @@ class TaskPlanner:
 
         for i, step in enumerate(plan.steps):
             plan.current_step_index = i
+            self._worker.update_progress(
+                plan.plan_id, f"Step {i + 1}/{len(plan.steps)}: {step.description}"
+            )
             step.status = "running"
             print(f"[TaskPlanner] ▶ Step {step.step_number}/{len(plan.steps)}: {step.description} [{step.tool_name}]")
 
@@ -257,13 +287,6 @@ class TaskPlanner:
                     on_step_update(plan, step)
                 except Exception:
                     pass
-
-            # Safety gate check
-            if step.requires_confirmation:
-                print(f"[TaskPlanner] ⚠ Step {step.step_number} requires confirmation.")
-                # We record that confirmation is needed; for background tasks without manual gate,
-                # we proceed cautiously or push to confirm
-                time.sleep(0.5)
 
             # Tool execution
             try:

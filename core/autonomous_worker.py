@@ -17,6 +17,7 @@ audio loop:
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import threading
 import time
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ class WorkerTask:
     status: str = "queued"  # queued | running | completed | failed
     result: Optional[str] = None
     error: Optional[str] = None
+    progress: str = "Queued"
 
 
 class AutonomousWorkerManager:
@@ -74,14 +76,36 @@ class AutonomousWorkerManager:
         task = WorkerTask(task_id=task_id, description=description, func=func)
         with self._lock:
             self._tasks[task_id] = task
+            if len(self._tasks) > 120:
+                finished = sorted(
+                    (item for item in self._tasks.values() if item.status in {"completed", "failed"}),
+                    key=lambda item: item.created_at,
+                )
+                for old in finished[: max(0, len(self._tasks) - 100)]:
+                    self._tasks.pop(old.task_id, None)
 
         self._executor.submit(self._run_task, task)
         return task
+
+    def update_progress(self, task_id: str, progress: str) -> None:
+        """Update the short status shown in the session activity panel."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is not None:
+                task.progress = str(progress)[:500]
+
+    def get_tasks(self) -> list[WorkerTask]:
+        """Return a stable newest-first snapshot for UI consumers."""
+        with self._lock:
+            return [copy.copy(task) for task in sorted(
+                self._tasks.values(), key=lambda item: item.created_at, reverse=True
+            )]
 
     def _run_task(self, task: WorkerTask) -> None:
         with self._lock:
             self._active_count += 1
             task.status = "running"
+            task.progress = "Starting"
 
         self._emit_event("started", task)
 
@@ -89,6 +113,7 @@ class AutonomousWorkerManager:
             res = task.func()
             task.result = str(res) if res is not None else "Completed."
             task.status = "completed"
+            task.progress = "Completed"
             self._emit_event("completed", task)
             if self._completion_notifier:
                 try:
@@ -100,6 +125,7 @@ class AutonomousWorkerManager:
         except Exception as e:
             task.error = str(e)
             task.status = "failed"
+            task.progress = "Failed"
             self._emit_event("failed", task)
             if self._completion_notifier:
                 try:
