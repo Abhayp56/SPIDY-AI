@@ -315,6 +315,20 @@ The **Cyber HUD Island** will glide into place at the top of your screen. Then:
 
 ---
 
+## 🧪 Running Tests
+
+SPIDY-AI includes an automated unit test suite.
+
+```bash
+# 1. Install development dependencies
+pip install -r requirements-dev.txt
+
+# 2. Run the test suite
+pytest
+```
+
+---
+
 ## 🤝 Contributing
 
 Contributions, bug reports, and feature ideas are welcome.
@@ -322,7 +336,8 @@ Contributions, bug reports, and feature ideas are welcome.
 1. 🍴 Fork the repo
 2. 🌿 Create a branch: `git checkout -b feature/web-slinger`
 3. 💾 Commit your changes
-4. 🚀 Push and open a Pull Request
+4. 🧪 Verify tests pass: `pytest`
+5. 🚀 Push and open a Pull Request
 
 ---
 

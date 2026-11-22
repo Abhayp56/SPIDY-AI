@@ -1,0 +1,2 @@
+# ── Development & Testing dependencies for S.P.I.D.Y. AI ─────────────────────
+pytest>=8.0.0,<9
