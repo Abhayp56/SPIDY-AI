@@ -9,11 +9,22 @@ from __future__ import annotations
 import collections
 import concurrent.futures
 import json
+import sys
 import threading
 import time
 from unittest.mock import patch, MagicMock
 
 import pytest
+
+# Ensure pyperclip is resolvable even in minimal or headless Linux environments
+if "pyperclip" not in sys.modules:
+    try:
+        import pyperclip  # noqa: F401
+    except ImportError:
+        _mock_pyperclip = MagicMock()
+        _mock_pyperclip.paste.return_value = ""
+        _mock_pyperclip.copy.return_value = None
+        sys.modules["pyperclip"] = _mock_pyperclip
 
 from core.clipboard_engine import (
     ClipboardEngine,
@@ -25,7 +36,7 @@ from core.clipboard_engine import (
 @pytest.fixture
 def standalone_engine():
     """Provides a fresh ClipboardEngine instance with background monitoring stopped."""
-    with patch("pyperclip.paste", return_value=""):
+    with patch.object(ClipboardEngine, "_poll_clipboard", return_value=None):
         engine = ClipboardEngine(max_history=5)
         engine.stop_monitoring()
     yield engine
@@ -200,8 +211,11 @@ def test_engine_get_history_limit(standalone_engine):
 
 
 def test_engine_deduplication_on_poll(standalone_engine):
-    with patch("pyperclip.paste", return_value="identical string"):
-        with patch("core.clipboard_engine._HAS_PYPERCLIP", True):
+    mock_pyperclip = MagicMock()
+    mock_pyperclip.paste.return_value = "identical string"
+
+    with patch("core.clipboard_engine._HAS_PYPERCLIP", True):
+        with patch("core.clipboard_engine.pyperclip", mock_pyperclip):
             item1 = standalone_engine._poll_clipboard()
             assert item1 is not None
             assert len(standalone_engine._history) == 1
@@ -328,7 +342,7 @@ def test_concurrent_history_access(standalone_engine):
 
 
 def test_get_clipboard_engine_singleton():
-    with patch("pyperclip.paste", return_value=""):
+    with patch.object(ClipboardEngine, "_poll_clipboard", return_value=None):
         inst1 = get_clipboard_engine()
         inst2 = get_clipboard_engine()
         assert inst1 is inst2
